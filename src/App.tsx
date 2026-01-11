@@ -28,21 +28,13 @@ export default function App() {
     })()
   }, [])
 
-  // Filter records by property type and exclude parking spaces
+  // Filter records by property type
+  // Lambda data is already pre-aggregated and filtered
   const filteredRecords = records.filter((r) => {
-    // Filter out parking spaces from "principais tipologias" column
-    const principaisTipologias = (r.raw?.principais_tipologias || r.raw?.['principais_tipologias'] || '').toUpperCase()
-    if (principaisTipologias === 'VAGA DE GARAGEM') {
-      return false
-    }
-
-    // Exact match on uso column
     const uso = (r.uso || '').toUpperCase().trim()
     if (propertyType === 'residential') {
-      // Exactly RESIDENCIAL
       return uso === 'RESIDENCIAL'
     } else {
-      // Exactly NAO RESIDENCIAL
       return uso === 'NAO RESIDENCIAL'
     }
   })

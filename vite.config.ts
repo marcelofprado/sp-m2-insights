@@ -9,10 +9,9 @@ export default defineConfig(async () => {
       port: 5174, // Different port from Rio project
       proxy: {
         '/api': {
-          // TODO: Update with actual São Paulo ITBI data endpoint
-          target: 'https://placeholder-sp-data-source.sp.gov.br',
+          target: 'https://7qrc3rfl2f226uqohfpkus4hzu0faves.lambda-url.us-west-2.on.aws',
           changeOrigin: true,
-          rewrite: (path) => path.replace(/^\/api/, '/api/itbi'),
+          rewrite: (path) => path.replace(/^\/api/, ''),
           secure: false
         }
       }

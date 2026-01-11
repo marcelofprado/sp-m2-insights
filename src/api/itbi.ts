@@ -1,50 +1,74 @@
 import axios from 'axios'
 import { format } from 'date-fns'
 
-// TODO: Update this with the actual São Paulo ITBI data source
-// For now, using a placeholder. You'll need to find the São Paulo equivalent
-// of Rio's ArcGIS ITBI endpoint or another official data source
-const BASE = import.meta.env.DEV ? '/api' : 'https://placeholder-sp-data-source.sp.gov.br/api/itbi'
+// Lambda URL for São Paulo ITBI data
+const BASE = import.meta.env.DEV
+  ? '/api'
+  : 'https://7qrc3rfl2f226uqohfpkus4hzu0faves.lambda-url.us-west-2.on.aws'
 
-// Fetch features - get more data for better coverage
+// Fetch features - Lambda API returns paginated data
 export async function fetchRecentFeatures(): Promise<any[]> {
-  const page = 1000
+  const limit = 5000
   let offset = 0
   let all: any[] = []
-
-  // Get current year and 2 years back for filtering
-  const currentYear = new Date().getFullYear()
-  const minYear = currentYear - 2
 
   try {
     while (true) {
       const params = new URLSearchParams({
-        f: 'json',
-        // Filter by year to reduce data load - last 3 years
-        where: `ano_transação >= ${minYear}`,
-        outFields: '*',
-        resultOffset: String(offset),
-        resultRecordCount: String(page)
+        limit: String(limit),
+        offset: String(offset)
       })
       const url = `${BASE}?${params.toString()}`
+      console.log(`Fetching from Lambda: offset=${offset}, limit=${limit}`)
+      console.log(`Full URL: ${url}`)
+
       const res = await axios.get(url, {
         timeout: 30000,
         headers: {
           'Accept': 'application/json'
-        }
+        },
+        transformResponse: [(data) => {
+          // Don't transform, just return raw data
+          return data
+        }]
       })
-      const data = res.data
-      if (!data || !data.features) break
-      all = all.concat(data.features)
 
-      // Increased limit to 50k records to ensure we get all streets
-      if (data.features.length < page || all.length >= 50000) break
-      offset += page
+      // Parse response - handle both object and string cases
+      let data = res.data
+
+      if (typeof data === 'string') {
+        console.log('Response is a string, parsing JSON with NaN handling...')
+        // Replace NaN with null to make it valid JSON
+        const cleanedData = data.replace(/:\s*NaN/g, ': null')
+        data = JSON.parse(cleanedData)
+      }
+
+      console.log('Data type:', typeof data)
+      console.log('Has data array:', Array.isArray(data?.data))
+
+      const dataArray = data?.data || []
+      console.log(`Data array length: ${dataArray.length}`)
+
+      if (!data || !dataArray || dataArray.length === 0) {
+        console.log('No more data to fetch.')
+        break
+      }
+
+      all = all.concat(dataArray)
+      console.log(`Fetched ${data.data.length} records. Total so far: ${all.length}/${data.total_records}`)
+
+      // Continue fetching until we get all records or reach a reasonable limit
+      if (data.data.length < limit || all.length >= data.total_records) {
+        console.log(`Pagination complete. Total records: ${all.length}`)
+        break
+      }
+      offset += limit
     }
+    console.log(`Final total: ${all.length} records fetched`)
     return all
   } catch (error) {
     console.error('Error fetching ITBI data:', error)
-    throw new Error('Failed to fetch property data from São Paulo City Hall. Please try again later.')
+    throw new Error('Failed to fetch property data from São Paulo. Please try again later.')
   }
 }
 
@@ -56,61 +80,73 @@ function normalizeString(s: string) {
 }
 
 export function parseFeaturesForRecords(features: any[]) {
-  // Convert aggregated monthly data into records
+  // Convert Lambda API data into records
   const records: any[] = []
+  console.log(`Parsing ${features.length} features from Lambda API`)
 
   for (const f of features) {
-    const attrs = f.attributes || {}
-
     // Get street name
-    const address = attrs.logradouro ? String(attrs.logradouro).trim() : ''
+    const address = f.street ? String(f.street).trim() : ''
     if (!address) continue
 
-    // Get year and month
-    const year = attrs['ano_transação'] || attrs.ano_transacao
-    const month = attrs['mês_transação'] || attrs.mes_transacao
+    // Parse year_month (format: "YYYY-MM")
+    const yearMonth = f.year_month
+    if (!yearMonth) continue
 
+    const [year, month] = yearMonth.split('-').map(Number)
     if (!year || !month) continue
 
     // Create date from year and month
     const dateVal = new Date(year, month - 1, 1)
 
-    // Get values
-    const avgValue = attrs['média_valor_imóvel'] || attrs.media_valor_imovel || 0
-    const avgArea = attrs['média_área_construída'] || attrs.media_area_construida || 0
+    // Get values from Lambda API response
+    const totalValue = f.total_transaction_value || 0
+    const totalArea = f.total_built_area_m2 || 0
+    const transactionCount = f.total_transactions || 1
+    const avgArea = f.avg_built_area_m2 || 0
 
-    // Get transaction count
-    const transactionCount = attrs['total_transações'] || attrs.total_transacoes || 1
+    // Calculate average value
+    const avgValue = totalValue / transactionCount
 
-    // Store weighted values for proper aggregation
-    // A = média_valor_imóvel * total_transações
-    const totalValue = avgValue * transactionCount
-    // B = média_área_construída * total_transações
-    const totalArea = avgArea * transactionCount
-
-    // Calculate m2 price for this record (will be recalculated during aggregation)
+    // Calculate m2 price
     let m2Price: number | null = null
     if (totalValue > 0 && totalArea > 0) {
       m2Price = totalValue / totalArea
     }
 
+    // Map construction_type to uso field for filtering
+    // Lambda data uses construction_type to distinguish residential vs commercial
+    let uso = 'RESIDENCIAL'
+    if (f.construction_type) {
+      const constructionType = String(f.construction_type).toUpperCase().trim()
+      // Commercial types include: COMERCIAL VERTICAL, COMERCIAL HORIZONTAL
+      if (constructionType.includes('COMERCIAL')) {
+        uso = 'NAO RESIDENCIAL'
+      }
+      // Residential types include: RESIDENCIAL VERTICAL, RESIDENCIAL HORIZONTAL
+      // Default is already RESIDENCIAL, so no change needed
+    }
+
     records.push({
-      raw: attrs,
+      raw: f,
       date: dateVal,
       address,
       value: avgValue,
       area: avgArea,
       m2Price,
       transactionCount,
-      totalValue, // Store for aggregation
-      totalArea,  // Store for aggregation
-      bairro: attrs.bairro || '',
-      uso: attrs.uso || '',
+      totalValue,
+      totalArea,
+      bairro: f.neighborhood || '',
+      uso: uso,
       year,
-      month
+      month,
+      propertyUse: f.property_use || '',
+      constructionType: f.construction_type || ''
     })
   }
 
+  console.log(`Parsed ${records.length} valid records from ${features.length} features`)
   return records
 }
 
